@@ -32,6 +32,9 @@
 
         <!-- Plugin versions -->
         <surefire.version>3.5.2</surefire.version>
+
+        <!-- Default TestNG suite file (override via -DsuiteXmlFile=...) -->
+        <suiteXmlFile>testng.xml</suiteXmlFile>
     </properties>
 
     <dependencies>
@@ -137,7 +140,7 @@
                 <version>${surefire.version}</version>
                 <configuration>
                     <suiteXmlFiles>
-                        <suiteXmlFile>testng.xml</suiteXmlFile>
+                        <suiteXmlFile>${suiteXmlFile}</suiteXmlFile>
                     </suiteXmlFiles>
                 </configuration>
             </plugin>
