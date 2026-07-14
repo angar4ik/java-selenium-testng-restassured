@@ -46,6 +46,11 @@ public final class EnvLoader {
         String key = line.substring(0, eq).trim();
         String value = line.substring(eq + 1).trim();
 
+        // Strip surrounding quotes if present (e.g. KEY="value")
+        if (value.startsWith("\"") && value.endsWith("\"")) {
+            value = value.substring(1, value.length() - 1);
+        }
+
         // Environment variable takes precedence over .env
         if (System.getenv(key) == null) {
             System.setProperty(key, value);
