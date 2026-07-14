@@ -12,6 +12,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    environment: test                 # ← ties to the 'test' environment with your secret
 
     steps:
       - name: Checkout
@@ -32,6 +33,8 @@ jobs:
           restore-keys: maven-${{ runner.os }}-
 
       - name: Run tests
+        env:
+          REQRES_API_KEY: ${{ secrets.REQRES_API_KEY }}   # ← exposes secret as env var
         run: mvn test -DsuiteXmlFile=${{ inputs.suite }}
 
       - name: Upload ExtentReports
@@ -41,3 +44,4 @@ jobs:
           name: extent-report
           path: test-output/extent-reports/
           retention-days: 7
+

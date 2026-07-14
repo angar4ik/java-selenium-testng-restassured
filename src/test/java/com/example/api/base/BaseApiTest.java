@@ -1,5 +1,6 @@
 package com.example.api.base;
 
+import com.example.config.EnvLoader;
 import com.example.config.TestConfig;
 import io.restassured.RestAssured;
 import io.restassured.builder.RequestSpecBuilder;
@@ -25,6 +26,13 @@ public abstract class BaseApiTest {
     protected static RequestSpecification reqSpec;
     protected static ResponseSpecification resSpec;
 
+    // Load .env (if present) before any config constants are resolved.
+    // This ensures that TestConfig.REQRES_API_KEY can read system properties
+    // set by EnvLoader for local development.
+    static {
+        EnvLoader.loadIfPresent();
+    }
+
     @BeforeClass
     public static void setUpApi() {
         RestAssured.baseURI = REQRES_BASE_URL;
@@ -32,6 +40,7 @@ public abstract class BaseApiTest {
         reqSpec = new RequestSpecBuilder()
                 .setContentType(ContentType.JSON)
                 .setAccept(ContentType.JSON)
+                .addHeader("x-api-key", TestConfig.REQRES_API_KEY)
                 .log(LogDetail.ALL)
                 .build();
 
