@@ -17,20 +17,15 @@ on:
         description: 'Datacenter location'
         required: false
         default: 'nbg1'
-        type: choice
-        options:
-          - nbg1
-          - fsn1
-          - hel1
+        type: string
 
-# Permissions for the workflow (GITHUB_TOKEN still needs actions:read for the test job)
 permissions:
   actions: read
   contents: read
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
-  # Job 1 — Provision Hetzner server & register self-hosted runner
+  # Job 1 — Provision Hetzner server, install runner, register it
   # ═══════════════════════════════════════════════════════════════════════════
   provision:
     runs-on: ubuntu-latest
@@ -39,10 +34,11 @@ jobs:
       server_id: ${{ steps.server.outputs.server_id }}
       server_ip: ${{ steps.wait.outputs.server_ip }}
       runner_label: ${{ steps.runner.outputs.label }}
+      ssh_key_id: ${{ steps.upload-key.outputs.ssh_key_id }}
 
     steps:
       # -------------------------------------------------------------------
-      # 1.1 Generate a temporary SSH key
+      # 1.1 Generate a temporary SSH key pair
       # -------------------------------------------------------------------
       - name: Generate SSH key
         id: ssh-key
@@ -57,7 +53,31 @@ jobs:
           echo "public_key=$(cat ~/.ssh/hetzner_tmp.pub)" >> $GITHUB_OUTPUT
 
       # -------------------------------------------------------------------
-      # 1.2 Create Hetzner Cloud server
+      # 1.2 Upload SSH key to Hetzner (hypervisor injects it at boot — instant, reliable)
+      # -------------------------------------------------------------------
+      - name: Upload SSH key to Hetzner
+        id: upload-key
+        run: |
+          RESP=$(curl -sS -X POST "https://api.hetzner.cloud/v1/ssh_keys" \
+            -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"gh-runner-${{ github.run_id }}\",
+              \"public_key\": \"${{ steps.ssh-key.outputs.public_key }}\"
+            }")
+
+          SSH_KEY_ID=$(echo "$RESP" | jq -r '.ssh_key.id // empty')
+          if [ -z "$SSH_KEY_ID" ]; then
+            echo "FAILED to upload SSH key!"
+            echo "$RESP" | jq '.'
+            exit 1
+          fi
+
+          echo "ssh_key_id=$SSH_KEY_ID" >> $GITHUB_OUTPUT
+          echo "SSH key uploaded (ID: $SSH_KEY_ID)"
+
+      # -------------------------------------------------------------------
+      # 1.3 Validate token
       # -------------------------------------------------------------------
       - name: Validate HCLOUD_TOKEN
         run: |
@@ -67,18 +87,13 @@ jobs:
             exit 1
           fi
 
+      # -------------------------------------------------------------------
+      # 1.4 Create Hetzner server (SSH key via native API, cloud-init only for packages)
+      # -------------------------------------------------------------------
       - name: Create Hetzner server
         id: server
         run: |
-          PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
-
-          # Build cloud-init YAML just for SSH key injection via runcmd
-          echo '#cloud-config' > /tmp/cloud-init.yaml
-          echo 'runcmd:' >> /tmp/cloud-init.yaml
-          echo '  - [mkdir, -p, /root/.ssh]' >> /tmp/cloud-init.yaml
-          echo "  - [sh, -c, 'echo \"${PUB_KEY}\" >> /root/.ssh/authorized_keys']" >> /tmp/cloud-init.yaml
-          echo '  - [chmod, 600, /root/.ssh/authorized_keys]' >> /tmp/cloud-init.yaml
-          USER_DATA=$(base64 -w0 /tmp/cloud-init.yaml)
+          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - curl\n  - wget\n' | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
@@ -89,6 +104,7 @@ jobs:
               \"image\": \"ubuntu-24.04\",
               \"location\": \"${{ inputs.location }}\",
               \"start_after_create\": true,
+              \"ssh_keys\": [${{ steps.upload-key.outputs.ssh_key_id }}],
               \"public_net\": {
                 \"enable_ipv4\": true,
                 \"enable_ipv6\": false
@@ -107,7 +123,7 @@ jobs:
           echo "Server $SERVER_ID created."
 
       # -------------------------------------------------------------------
-      # 1.3 Wait for server ready
+      # 1.5 Wait for server running + get IP
       # -------------------------------------------------------------------
       - name: Wait for server ready
         id: wait
@@ -133,7 +149,7 @@ jobs:
           fi
 
       # -------------------------------------------------------------------
-      # 1.4 Setup server via root password (install packages, SSH key, Chrome)
+      # 1.6 Setup server: wait for SSH + install Chrome & Xvfb
       # -------------------------------------------------------------------
       - name: Setup server
         run: |
@@ -143,28 +159,31 @@ jobs:
 
           IP="${{ steps.wait.outputs.server_ip }}"
 
-          # Wait for SSH key auth (cloud-init injects the key via runcmd)
+          # Wait for SSH (key injected by hypervisor, cloud-init installs packages)
           for i in $(seq 1 30); do
             echo "SSH attempt $i/30..."
-            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
+            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 \
+              -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
               echo "SSH key auth OK (attempt $i)"
               break
             fi
-            echo "  waiting for cloud-init..."
+            echo "  waiting..."
             sleep 5
           done
 
-          # Install packages + Chrome
-          echo "Installing packages..."
-          ssh -i ~/.ssh/hetzner_tmp root@"$IP" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless maven git xvfb curl wget && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq; rm -f /tmp/chrome.deb; echo Packages_done'
-          echo "Packages done."
+          # Install Chrome + Xvfb (not in cloud-init to keep it simple)
+          echo "Installing Chrome & Xvfb..."
+          ssh -i ~/.ssh/hetzner_tmp root@"$IP" \
+            'export DEBIAN_FRONTEND=noninteractive
+            apt-get install -y -qq xvfb
+            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq
+            rm -f /tmp/chrome.deb
+            echo Packages_done'
+          echo "Setup complete."
 
       # -------------------------------------------------------------------
-      # 1.5 Prepare and copy test scripts (not needed — runner does everything)
-      # -------------------------------------------------------------------
-
-      # -------------------------------------------------------------------
-      # 1.6 Download, configure, and start the GitHub Actions runner
+      # 1.7 Install & start self-hosted runner
       # -------------------------------------------------------------------
       - name: Install & start self-hosted runner
         id: runner
@@ -172,29 +191,24 @@ jobs:
           LABEL="hetzner-${{ github.run_id }}"
           echo "label=$LABEL" >> $GITHUB_OUTPUT
 
-          # --- Fetch a runner registration token from GitHub ---
-          # NOTE: GITHUB_TOKEN cannot create runner registration tokens.
-          # You need a PAT with 'repo' scope stored as GH_PAT secret.
+          # Get registration token
           RESP=$(curl -sS -X POST \
             -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token")
-          echo "Registration token response: $RESP"
           TOKEN=$(echo "$RESP" | jq -r '.token')
-
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "::error::Could not obtain runner registration token."
-            echo "Create a PAT at https://github.com/settings/tokens with 'repo' scope"
-            echo "and add it as secret GH_PAT in Settings → Environments → test."
+            echo "::error::Could not obtain runner registration token. Check GH_PAT secret."
             exit 1
           fi
 
-          # --- Build runner setup script locally, then SCP & execute it ---
-          printf '#!/bin/bash\nset -euo pipefail\n\nRUNNER_DIR="/root/actions-runner"\nmkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"\n\n# Fetch the latest runner release\nLATEST=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r '"'"'.tag_name'"'"')\nVERSION="${LATEST#v}"\ncurl -o runner.tar.gz -L "https://github.com/actions/runner/releases/download/${LATEST}/actions-runner-linux-x64-${VERSION}.tar.gz"\ntar xzf runner.tar.gz && rm runner.tar.gz\n\n# Install any missing OS dependencies\n./bin/installdependencies.sh 2>&1 | tail -3 || true\n\n# Configure the runner (--ephemeral = auto-deregister after one job)\n./config.sh --url "https://github.com/${{ github.repository }}" --token "%s" --name "%s" --labels "%s" --ephemeral --unattended --work _work --replace\n\n# Launch the runner in the background\nnohup ./run.sh > /tmp/runner.log 2>&1 &\necho "Runner launched (label: %s)"\nsleep 3\necho "Runner PID: $(pgrep -f '"'"'Runner.Listener'"'"' || echo '"'"'not found yet'"'"')"\n' "${TOKEN}" "${LABEL}" "${LABEL}" "${LABEL}" > /tmp/runner-setup.sh
+          # Build & SCP runner setup script
+          printf '#!/bin/bash\nset -euo pipefail\n\ncd /root/actions-runner\nmkdir -p . && cd .\n\nLATEST=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r '\"'\"'.tag_name'\"'\"')\nVERSION="${LATEST#v}"\ncurl -o runner.tar.gz -L "https://github.com/actions/runner/releases/download/${LATEST}/actions-runner-linux-x64-${VERSION}.tar.gz"\ntar xzf runner.tar.gz && rm runner.tar.gz\n./bin/installdependencies.sh 2>&1 | tail -3 || true\n./config.sh --url "https://github.com/${{ github.repository }}" --token "%s" --name "%s" --labels "%s" --ephemeral --unattended --work _work --replace\nnohup ./run.sh > /tmp/runner.log 2>&1 &\nsleep 2\necho "Runner PID: $(pgrep -f '\"'\"'Runner.Listener'\"'\"' || echo N/A)"\n' "${TOKEN}" "${LABEL}" "${LABEL}" > /tmp/runner-setup.sh
+          chmod +x /tmp/runner-setup.sh
           scp -i ~/.ssh/hetzner_tmp /tmp/runner-setup.sh root@${{ steps.wait.outputs.server_ip }}:/root/runner-setup.sh
           ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash /root/runner-setup.sh
 
-          # --- Wait for the runner to appear as 'online' in GitHub ---
+          # Wait for runner online
           echo "Waiting for runner '${LABEL}' to come online..."
           for i in $(seq 1 20); do
             STATUS=$(curl -sS \
@@ -210,16 +224,8 @@ jobs:
             sleep 5
           done
 
-          # Final check
-          FINAL_STATUS=$(curl -sS \
-            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
-            | jq -r ".runners[] | select(.name == \"${LABEL}\") | .status // \"offline\"")
-          echo "Final runner status: $FINAL_STATUS"
-
   # ═══════════════════════════════════════════════════════════════════════════
-  # Job 2 — Run tests on the self-hosted runner (Hetzner server)
+  # Job 2 — Run tests on the self-hosted runner
   # ═══════════════════════════════════════════════════════════════════════════
   test:
     needs: provision
@@ -260,7 +266,7 @@ jobs:
           retention-days: 7
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # Job 3 — Cleanup: delete the Hetzner server (ALWAYS)
+  # Job 3 — Cleanup: delete server + SSH key (ALWAYS)
   # ═══════════════════════════════════════════════════════════════════════════
   cleanup:
     needs: [provision, test]
@@ -278,5 +284,18 @@ jobs:
               -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}"
             echo "Server $SERVER_ID deleted."
           else
-            echo "No server ID found — nothing to delete."
+            echo "No server ID — skipping."
+          fi
+
+      - name: Delete SSH key from Hetzner
+        if: always()
+        run: |
+          SSH_KEY_ID="${{ needs.provision.outputs.ssh_key_id }}"
+          if [ -n "$SSH_KEY_ID" ] && [ "$SSH_KEY_ID" != "" ]; then
+            echo "Deleting SSH key $SSH_KEY_ID..."
+            curl -sS -X DELETE "https://api.hetzner.cloud/v1/ssh_keys/$SSH_KEY_ID" \
+              -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}"
+            echo "SSH key $SSH_KEY_ID deleted."
+          else
+            echo "No SSH key ID — skipping."
           fi
