@@ -182,12 +182,15 @@ jobs:
           echo "Installing Chrome & starting Xvfb..."
           ssh -i ~/.ssh/hetzner_tmp root@"$IP" \
             'export DEBIAN_FRONTEND=noninteractive
+            # Ensure Maven is installed (cloud-init may not have finished)
+            apt-get install -y -qq maven 2>/dev/null
             wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
             apt-get install -y -qq /tmp/chrome.deb
             rm -f /tmp/chrome.deb
             ln -sf /usr/bin/google-chrome-stable /usr/local/bin/google-chrome
             Xvfb :99 -screen 0 1920x1080x24 &
-            echo "Chrome: $(google-chrome --version 2>/dev/null || google-chrome-stable --version)"
+            echo "Chrome: $(google-chrome --version 2>/dev/null || echo NOT_FOUND)"
+            echo "Maven: $(mvn --version 2>/dev/null | head -1 || echo NOT_FOUND)"
             echo Packages_done'
           echo "Setup complete."
 
