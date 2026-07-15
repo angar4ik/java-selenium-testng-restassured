@@ -11,7 +11,7 @@ on:
       server_type:
         description: 'Hetzner server type'
         required: false
-        default: 'cax11'
+        default: 'cx23'
         type: string
       location:
         description: 'Datacenter location'
