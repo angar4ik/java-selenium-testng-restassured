@@ -67,23 +67,8 @@ jobs:
         run: |
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
-          # cloud-init: base packages + SSH key
-          USER_DATA=$(base64 -w0 <<CLOUD_INIT
-#cloud-config
-package_update: true
-package_upgrade: false
-packages:
-  - openjdk-21-jdk-headless
-  - maven
-  - git
-  - xvfb
-  - curl
-  - wget
-  - libicu74
-ssh_authorized_keys:
-  - ${PUB_KEY}
-CLOUD_INIT
-          )
+          # cloud-init: base packages + SSH key (printf avoids heredoc YAML issues)
+          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - xvfb\n  - curl\n  - wget\n  - libicu74\nssh_authorized_keys:\n  - %s\n' "${PUB_KEY}" | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
@@ -158,13 +143,7 @@ CLOUD_INIT
       # -------------------------------------------------------------------
       - name: Install Chrome
         run: |
-          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash <<'EOF'
-            set -euo pipefail
-            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-            dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>&1 | tail -3
-            rm /tmp/chrome.deb
-            echo "Chrome: $(google-chrome --version)"
-EOF
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} 'set -e; wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f; rm -f /tmp/chrome.deb; echo "Chrome: $(google-chrome --version)"'
 
       # -------------------------------------------------------------------
       # 1.6 Download, configure, and start the GitHub Actions runner
@@ -188,40 +167,10 @@ EOF
             exit 1
           fi
 
-          # --- Install the runner on the remote server ---
-          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash <<REMOTE
-            set -euo pipefail
-
-            RUNNER_DIR="/root/actions-runner"
-            mkdir -p "\$RUNNER_DIR" && cd "\$RUNNER_DIR"
-
-            # Fetch the latest runner release
-            LATEST=\$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name')
-            VERSION="\${LATEST#v}"   # strip leading 'v'
-            curl -o runner.tar.gz -L \
-              "https://github.com/actions/runner/releases/download/\${LATEST}/actions-runner-linux-x64-\${VERSION}.tar.gz"
-            tar xzf runner.tar.gz && rm runner.tar.gz
-
-            # Install any missing OS dependencies
-            ./bin/installdependencies.sh 2>&1 | tail -3 || true
-
-            # Configure the runner (--ephemeral = auto-deregister after one job)
-            ./config.sh \
-              --url "https://github.com/${{ github.repository }}" \
-              --token "${TOKEN}" \
-              --name "${LABEL}" \
-              --labels "${LABEL}" \
-              --ephemeral \
-              --unattended \
-              --work _work \
-              --replace
-
-            # Launch the runner in the background
-            nohup ./run.sh > /tmp/runner.log 2>&1 &
-            echo "Runner launched (label: ${LABEL})"
-            sleep 3
-            echo "Runner PID: \$(pgrep -f 'Runner.Listener' || echo 'not found yet')"
-REMOTE
+          # --- Build runner setup script locally, then SCP & execute it ---
+          printf '#!/bin/bash\nset -euo pipefail\n\nRUNNER_DIR="/root/actions-runner"\nmkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"\n\n# Fetch the latest runner release\nLATEST=$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r '"'"'.tag_name'"'"')\nVERSION="${LATEST#v}"\ncurl -o runner.tar.gz -L "https://github.com/actions/runner/releases/download/${LATEST}/actions-runner-linux-x64-${VERSION}.tar.gz"\ntar xzf runner.tar.gz && rm runner.tar.gz\n\n# Install any missing OS dependencies\n./bin/installdependencies.sh 2>&1 | tail -3 || true\n\n# Configure the runner (--ephemeral = auto-deregister after one job)\n./config.sh --url "https://github.com/${{ github.repository }}" --token "%s" --name "%s" --labels "%s" --ephemeral --unattended --work _work --replace\n\n# Launch the runner in the background\nnohup ./run.sh > /tmp/runner.log 2>&1 &\necho "Runner launched (label: %s)"\nsleep 3\necho "Runner PID: $(pgrep -f '"'"'Runner.Listener'"'"' || echo '"'"'not found yet'"'"')"\n' "${TOKEN}" "${LABEL}" "${LABEL}" "${LABEL}" > /tmp/runner-setup.sh
+          scp -i ~/.ssh/hetzner_tmp /tmp/runner-setup.sh root@${{ steps.wait.outputs.server_ip }}:/root/runner-setup.sh
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash /root/runner-setup.sh
 
           # --- Wait for the runner to appear as 'online' in GitHub ---
           echo "Waiting for runner '${LABEL}' to come online..."

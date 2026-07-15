@@ -60,21 +60,9 @@ jobs:
       - name: Create Hetzner server
         id: server
         run: |
-          # Build cloud-init with the temporary SSH key baked in
+          # Build cloud-init with the temporary SSH key baked in (printf avoids heredoc YAML issues)
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
-          USER_DATA=$(base64 -w0 <<CLOUD_INIT
-#cloud-config
-package_update: true
-package_upgrade: false
-packages:
-  - openjdk-21-jdk-headless
-  - maven
-  - xvfb
-  - curl
-ssh_authorized_keys:
-  - ${PUB_KEY}
-CLOUD_INIT
-          )
+          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - xvfb\n  - curl\nssh_authorized_keys:\n  - %s\n' "${PUB_KEY}" | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
@@ -151,14 +139,7 @@ CLOUD_INIT
       # -----------------------------------------------------------------------
       - name: Install Chrome on server
         run: |
-          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash <<'SETUP'
-            set -euo pipefail
-            # Install Google Chrome (stable) — needed by Selenium ChromeDriver
-            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-            dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>&1 | tail -5
-            rm /tmp/chrome.deb
-            echo "Chrome installed: $(google-chrome --version)"
-SETUP
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} 'set -e; wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f; rm -f /tmp/chrome.deb; echo "Chrome: $(google-chrome --version)"'
 
       # -----------------------------------------------------------------------
       # 7. SCP project files
@@ -176,28 +157,7 @@ SETUP
       # -----------------------------------------------------------------------
       - name: Prepare remote test script
         run: |
-          cat > /tmp/remote-test.sh <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-cd /root/project
-
-# Start virtual display for headed mode (or fallback)
-Xvfb :99 -screen 0 1920x1080x24 &
-XVFB_PID=$!
-export DISPLAY=:99
-
-# Run tests. WebDriverManager auto-downloads the correct chromedriver.
-# SUITE_XML and REQRES_API_KEY must be in the environment.
-mvn test \
-  -DsuiteXmlFile="${SUITE_XML:-testng.xml}" \
-  -Dheaded=false \
-  2>&1 | tee test-run.log
-RC=${PIPESTATUS[0]}
-
-kill $XVFB_PID 2>/dev/null || true
-exit $RC
-SCRIPT
+          printf '#!/usr/bin/env bash\nset -euo pipefail\n\ncd /root/project\n\n# Start virtual display (fallback for headless)\nXvfb :99 -screen 0 1920x1080x24 &\nXVFB_PID=$!\nexport DISPLAY=:99\n\n# Run tests (WebDriverManager auto-downloads chromedriver)\nmvn test -DsuiteXmlFile="${SUITE_XML:-testng.xml}" -Dheaded=false 2>&1 | tee test-run.log\nRC=${PIPESTATUS[0]}\n\nkill $XVFB_PID 2>/dev/null || true\nexit $RC\n' > /tmp/remote-test.sh
 
           chmod +x /tmp/remote-test.sh
           scp -i ~/.ssh/hetzner_tmp /tmp/remote-test.sh root@${{ steps.wait.outputs.server_ip }}:/root/remote-test.sh
