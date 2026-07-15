@@ -144,12 +144,13 @@ jobs:
 
           # Retry SSH until cloud-init finishes (can take 60-90s)
           for i in $(seq 1 12); do
+            echo "SSH attempt $i/12..."
             if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
-              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"' 2>/dev/null; then
+              -o StrictHostKeyChecking=accept-new \
+              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"'; then
               echo "SSH connected (attempt $i)"
               break
             fi
-            echo "SSH not ready yet... ($i/12)"
             sleep 10
           done
 
