@@ -137,24 +137,30 @@ jobs:
           PW='${{ steps.server.outputs.root_password }}'
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
-          # Wait for SSH to be available, then setup everything
+          # Wait for SSH, then setup
           for i in $(seq 1 30); do
             echo "SSH attempt $i/30..."
-            if sshpass -p "$PW" ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>/dev/null; then
+            if sshpass -p "$PW" ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
               echo "SSH connected (attempt $i)"
               break
             fi
+            echo "  failed, retrying in 5s..."
             sleep 5
           done
 
           # Inject our SSH key for passwordless access
+          echo "Injecting SSH key..."
           sshpass -p "$PW" ssh root@"$IP" "echo '$PUB_KEY' >> /root/.ssh/authorized_keys"
+          echo "Key injected."
 
           # Install packages + Chrome
-          sshpass -p "$PW" ssh root@"$IP" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless maven git xvfb curl wget && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq; rm -f /tmp/chrome.deb; echo "Packages done"'
+          echo "Installing packages..."
+          sshpass -p "$PW" ssh root@"$IP" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless maven git xvfb curl wget && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq; rm -f /tmp/chrome.deb; echo Packages_done'
+          echo "Packages done."
 
-          # Verify key-based SSH works now
-          if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 root@"$IP" 'echo SSH_KEY_OK' 2>/dev/null; then
+          # Verify key-based SSH
+          echo "Verifying key auth..."
+          if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 root@"$IP" 'echo SSH_KEY_OK' 2>&1; then
             echo "SSH key auth verified"
           else
             echo "::error::SSH key setup failed"
