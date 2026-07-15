@@ -155,23 +155,30 @@ jobs:
         run: |
           echo "${{ steps.ssh-key.outputs.private_key }}" > ~/.ssh/hetzner_tmp
           chmod 600 ~/.ssh/hetzner_tmp
-          ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
           IP="${{ steps.wait.outputs.server_ip }}"
 
           # Wait for SSH (key injected by hypervisor, cloud-init installs packages)
+          CONNECTED=false
           for i in $(seq 1 30); do
             echo "SSH attempt $i/30..."
             if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 \
-              -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
+              -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK'; then
               echo "SSH key auth OK (attempt $i)"
+              CONNECTED=true
               break
             fi
             echo "  waiting..."
             sleep 5
           done
 
-          # Install Chrome + Xvfb (not in cloud-init to keep it simple)
+          if [ "$CONNECTED" != "true" ]; then
+            echo "::error::SSH failed after 30 attempts"
+            exit 1
+          fi
+
+          # Install Chrome + Xvfb
           echo "Installing Chrome & Xvfb..."
           ssh -i ~/.ssh/hetzner_tmp root@"$IP" \
             'export DEBIAN_FRONTEND=noninteractive
