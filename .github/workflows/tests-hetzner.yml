@@ -136,7 +136,17 @@ jobs:
           echo "${{ steps.ssh-key.outputs.private_key }}" > ~/.ssh/hetzner_tmp
           chmod 600 ~/.ssh/hetzner_tmp
           ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"'
+
+          # Retry SSH until cloud-init finishes (can take 60-90s)
+          for i in $(seq 1 12); do
+            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
+              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"' 2>/dev/null; then
+              echo "SSH connected (attempt $i)"
+              break
+            fi
+            echo "SSH not ready yet... ($i/12)"
+            sleep 10
+          done
 
       # -----------------------------------------------------------------------
       # 6. Install Google Chrome on remote
