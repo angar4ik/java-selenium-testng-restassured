@@ -246,6 +246,7 @@ jobs:
     env:
       DISPLAY: :99
       CHROME_BIN: /usr/bin/google-chrome-stable
+      PATH: /usr/bin:/usr/share/maven/bin:$PATH
 
     steps:
       - name: Checkout
