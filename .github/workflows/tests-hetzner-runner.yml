@@ -187,7 +187,7 @@ jobs:
             wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
             apt-get install -y -qq /tmp/chrome.deb
             rm -f /tmp/chrome.deb
-            ln -sf /usr/bin/google-chrome-stable /usr/local/bin/google-chrome
+            ln -sf /usr/bin/google-chrome-stable /usr/bin/google-chrome
             Xvfb :99 -screen 0 1920x1080x24 &
             echo "Chrome: $(google-chrome --version 2>/dev/null || echo NOT_FOUND)"
             echo "Maven: $(mvn --version 2>/dev/null | head -1 || echo NOT_FOUND)"
@@ -252,6 +252,7 @@ jobs:
     environment: test
     env:
       DISPLAY: :99
+      CHROME_BIN: /usr/bin/google-chrome-stable
 
     steps:
       - name: Checkout
