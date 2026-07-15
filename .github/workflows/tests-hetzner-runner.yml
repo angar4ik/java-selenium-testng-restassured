@@ -93,7 +93,7 @@ jobs:
       - name: Create Hetzner server
         id: server
         run: |
-          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - curl\n  - wget\n' | base64 -w0)
+          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - curl\n  - wget\n  - xvfb\n  - libnss3\n  - libatk-bridge2.0-0\n  - libcups2t64\n  - libdrm2\n  - libxkbcommon0\n  - libxcomposite1\n  - libxdamage1\n  - libxrandr2\n  - libgbm1\n  - libasound2t64\n  - fonts-liberation\n' | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
@@ -178,15 +178,15 @@ jobs:
             exit 1
           fi
 
-          # Install Chrome + Xvfb
-          echo "Installing Chrome & Xvfb..."
+          # Install Chrome + start Xvfb
+          echo "Installing Chrome & starting Xvfb..."
           ssh -i ~/.ssh/hetzner_tmp root@"$IP" \
             'export DEBIAN_FRONTEND=noninteractive
-            apt-get install -y -qq xvfb
             wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
             apt-get install -y -qq /tmp/chrome.deb
             rm -f /tmp/chrome.deb
             ln -sf /usr/bin/google-chrome-stable /usr/local/bin/google-chrome
+            Xvfb :99 -screen 0 1920x1080x24 &
             echo "Chrome: $(google-chrome --version 2>/dev/null || google-chrome-stable --version)"
             echo Packages_done'
           echo "Setup complete."
@@ -247,6 +247,8 @@ jobs:
       - self-hosted
       - ${{ needs.provision.outputs.runner_label }}
     environment: test
+    env:
+      DISPLAY: :99
 
     steps:
       - name: Checkout
