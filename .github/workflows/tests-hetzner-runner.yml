@@ -182,7 +182,7 @@ jobs:
           echo "Installing Chrome & Xvfb..."
           ssh -i ~/.ssh/hetzner_tmp root@"$IP" \
             'export DEBIAN_FRONTEND=noninteractive
-            apt-get install -y -qq xvfb
+            apt-get install -y -qq xvfb jq
             wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
             dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq
             rm -f /tmp/chrome.deb
