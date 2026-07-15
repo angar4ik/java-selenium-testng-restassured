@@ -63,6 +63,14 @@ jobs:
       # -------------------------------------------------------------------
       # 1.2 Create Hetzner Cloud server
       # -------------------------------------------------------------------
+      - name: Validate HCLOUD_TOKEN
+        run: |
+          if [ -z "${{ secrets.HCLOUD_TOKEN }}" ]; then
+            echo "::error::HCLOUD_TOKEN is empty or not set!"
+            echo "Add it at: Settings → Environments → test → Environment secrets → HCLOUD_TOKEN"
+            exit 1
+          fi
+
       - name: Create Hetzner server
         id: server
         run: |
