@@ -86,7 +86,7 @@ jobs:
             }")
 
           SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id // empty')
-          ROOT_PW=$(echo "$RESPONSE" | jq -r '.server.root_password // empty')
+          ROOT_PW=$(echo "$RESPONSE" | jq -r '.root_password // empty')
           if [ -z "$SERVER_ID" ] || [ -z "$ROOT_PW" ]; then
             echo "FAILED to create server or missing root password!"
             echo "$RESPONSE" | jq '.'
