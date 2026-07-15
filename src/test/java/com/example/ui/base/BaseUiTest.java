@@ -34,6 +34,17 @@ public abstract class BaseUiTest {
         boolean headed = Boolean.parseBoolean(System.getProperty("headed", "false"));
 
         ChromeOptions options = new ChromeOptions();
+
+        // Allow overriding Chrome binary via env var or system property
+        String chromeBin = System.getenv("CHROME_BIN");
+        if (chromeBin == null || chromeBin.isBlank()) {
+            chromeBin = System.getProperty("chrome.binary");
+        }
+        if (chromeBin != null && !chromeBin.isBlank()) {
+            options.setBinary(chromeBin);
+            log.info("Using Chrome binary: {}", chromeBin);
+        }
+
         if (!headed) {
             options.addArguments("--headless=new");   // new headless mode (closer to real browser)
         }
