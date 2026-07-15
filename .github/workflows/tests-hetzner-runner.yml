@@ -38,6 +38,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   provision:
     runs-on: ubuntu-latest
+    environment: test
     outputs:
       server_id: ${{ steps.server.outputs.server_id }}
       server_ip: ${{ steps.wait.outputs.server_ip }}
@@ -244,6 +245,7 @@ jobs:
     needs: [provision, test]
     if: always()
     runs-on: ubuntu-latest
+    environment: test
 
     steps:
       - name: Delete Hetzner server
