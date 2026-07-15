@@ -1,0 +1,310 @@
+name: Run Tests on Hetzner (Self-Hosted Runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'TestNG suite to run'
+        required: false
+        default: 'testng.xml'
+        type: string
+      server_type:
+        description: 'Hetzner server type'
+        required: false
+        default: 'cx22'
+        type: choice
+        options:
+          - cx22
+          - cx32
+          - cx42
+      location:
+        description: 'Datacenter location'
+        required: false
+        default: 'nbg1'
+        type: choice
+        options:
+          - nbg1
+          - fsn1
+          - hel1
+
+# Needed so GITHUB_TOKEN can create a runner registration token
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 1 — Provision Hetzner server & register self-hosted runner
+  # ═══════════════════════════════════════════════════════════════════════════
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      server_id: ${{ steps.server.outputs.server_id }}
+      server_ip: ${{ steps.wait.outputs.server_ip }}
+      runner_label: ${{ steps.runner.outputs.label }}
+
+    steps:
+      # -------------------------------------------------------------------
+      # 1.1 Generate a temporary SSH key
+      # -------------------------------------------------------------------
+      - name: Generate SSH key
+        id: ssh-key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keygen -t ed25519 -f ~/.ssh/hetzner_tmp -N "" -C "gh-runner-${{ github.run_id }}"
+          {
+            echo "private_key<<EOF"
+            cat ~/.ssh/hetzner_tmp
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          echo "public_key=$(cat ~/.ssh/hetzner_tmp.pub)" >> $GITHUB_OUTPUT
+
+      # -------------------------------------------------------------------
+      # 1.2 Create Hetzner Cloud server
+      # -------------------------------------------------------------------
+      - name: Create Hetzner server
+        id: server
+        run: |
+          PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
+
+          # cloud-init: base packages + SSH key
+          USER_DATA=$(base64 -w0 <<CLOUD_INIT
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - openjdk-21-jdk-headless
+  - maven
+  - git
+  - xvfb
+  - curl
+  - wget
+  - libicu74
+ssh_authorized_keys:
+  - ${PUB_KEY}
+CLOUD_INIT
+          )
+
+          RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
+            -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"gh-runner-${{ github.run_id }}\",
+              \"server_type\": \"${{ inputs.server_type }}\",
+              \"image\": \"ubuntu-24.04\",
+              \"location\": \"${{ inputs.location }}\",
+              \"start_after_create\": true,
+              \"public_net\": {
+                \"enable_ipv4\": true,
+                \"enable_ipv6\": false
+              },
+              \"user_data\": \"${USER_DATA}\"
+            }")
+
+          SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id // empty')
+          if [ -z "$SERVER_ID" ]; then
+            echo "FAILED to create server!"
+            echo "$RESPONSE" | jq '.'
+            exit 1
+          fi
+
+          echo "server_id=$SERVER_ID" >> $GITHUB_OUTPUT
+          echo "Server $SERVER_ID created."
+
+      # -------------------------------------------------------------------
+      # 1.3 Wait for server to be running + get its IP
+      # -------------------------------------------------------------------
+      - name: Wait for server ready
+        id: wait
+        run: |
+          SERVER_ID="${{ steps.server.outputs.server_id }}"
+          IP=""
+
+          for i in $(seq 1 30); do
+            DATA=$(curl -sS "https://api.hetzner.cloud/v1/servers/$SERVER_ID" \
+              -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}")
+            STATUS=$(echo "$DATA" | jq -r '.server.status')
+            IP=$(echo "$DATA" | jq -r '.server.public_net.ipv4.ip // empty')
+
+            if [ "$STATUS" = "running" ] && [ -n "$IP" ]; then
+              echo "Server ready: $IP"
+              echo "server_ip=$IP" >> $GITHUB_OUTPUT
+              break
+            fi
+            echo "Waiting... status=$STATUS  ip=$IP  ($i/30)"
+            sleep 10
+          done
+
+          if [ -z "$IP" ]; then
+            echo "Server never became ready."
+            exit 1
+          fi
+
+          # Let cloud-init finish installing packages
+          sleep 10
+
+      # -------------------------------------------------------------------
+      # 1.4 Configure SSH access
+      # -------------------------------------------------------------------
+      - name: Configure SSH
+        run: |
+          echo "${{ steps.ssh-key.outputs.private_key }}" > ~/.ssh/hetzner_tmp
+          chmod 600 ~/.ssh/hetzner_tmp
+          ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"'
+
+      # -------------------------------------------------------------------
+      # 1.5 Install Google Chrome (needed for Selenium UI tests)
+      # -------------------------------------------------------------------
+      - name: Install Chrome
+        run: |
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash <<'EOF'
+            set -euo pipefail
+            wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>&1 | tail -3
+            rm /tmp/chrome.deb
+            echo "Chrome: $(google-chrome --version)"
+EOF
+
+      # -------------------------------------------------------------------
+      # 1.6 Download, configure, and start the GitHub Actions runner
+      # -------------------------------------------------------------------
+      - name: Install & start self-hosted runner
+        id: runner
+        run: |
+          LABEL="hetzner-${{ github.run_id }}"
+          echo "label=$LABEL" >> $GITHUB_OUTPUT
+
+          # --- Fetch a runner registration token from GitHub ---
+          TOKEN=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token" \
+            | jq -r '.token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "ERROR: Could not obtain runner registration token."
+            echo "Make sure 'permissions.actions: write' is set and the repo allows self-hosted runners."
+            exit 1
+          fi
+
+          # --- Install the runner on the remote server ---
+          ssh -i ~/.ssh/hetzner_tmp root@${{ steps.wait.outputs.server_ip }} bash <<REMOTE
+            set -euo pipefail
+
+            RUNNER_DIR="/root/actions-runner"
+            mkdir -p "\$RUNNER_DIR" && cd "\$RUNNER_DIR"
+
+            # Fetch the latest runner release
+            LATEST=\$(curl -sS https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name')
+            VERSION="\${LATEST#v}"   # strip leading 'v'
+            curl -o runner.tar.gz -L \
+              "https://github.com/actions/runner/releases/download/\${LATEST}/actions-runner-linux-x64-\${VERSION}.tar.gz"
+            tar xzf runner.tar.gz && rm runner.tar.gz
+
+            # Install any missing OS dependencies
+            ./bin/installdependencies.sh 2>&1 | tail -3 || true
+
+            # Configure the runner (--ephemeral = auto-deregister after one job)
+            ./config.sh \
+              --url "https://github.com/${{ github.repository }}" \
+              --token "${TOKEN}" \
+              --name "${LABEL}" \
+              --labels "${LABEL}" \
+              --ephemeral \
+              --unattended \
+              --work _work \
+              --replace
+
+            # Launch the runner in the background
+            nohup ./run.sh > /tmp/runner.log 2>&1 &
+            echo "Runner launched (label: ${LABEL})"
+            sleep 3
+            echo "Runner PID: \$(pgrep -f 'Runner.Listener' || echo 'not found yet')"
+REMOTE
+
+          # --- Wait for the runner to appear as 'online' in GitHub ---
+          echo "Waiting for runner '${LABEL}' to come online..."
+          for i in $(seq 1 20); do
+            STATUS=$(curl -sS \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+              | jq -r ".runners[] | select(.name == \"${LABEL}\") | .status // \"offline\"")
+            if [ "$STATUS" = "online" ]; then
+              echo "Runner '${LABEL}' is online (attempt $i)!"
+              break
+            fi
+            echo "  $i/20 — status = $STATUS"
+            sleep 5
+          done
+
+          # Final check
+          FINAL_STATUS=$(curl -sS \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+            | jq -r ".runners[] | select(.name == \"${LABEL}\") | .status // \"offline\"")
+          echo "Final runner status: $FINAL_STATUS"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 2 — Run tests on the self-hosted runner (Hetzner server)
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    needs: provision
+    runs-on:
+      - self-hosted
+      - ${{ needs.provision.outputs.runner_label }}
+    environment: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v6
+        with:
+          path: ~/.m2
+          key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
+          restore-keys: maven-${{ runner.os }}-
+
+      - name: Run tests
+        env:
+          REQRES_API_KEY: ${{ secrets.REQRES_API_KEY }}
+        run: mvn test -DsuiteXmlFile=${{ inputs.suite }}
+
+      - name: Upload ExtentReports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: extent-report-hetzner
+          path: test-output/extent-reports/
+          retention-days: 7
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 3 — Cleanup: delete the Hetzner server (ALWAYS)
+  # ═══════════════════════════════════════════════════════════════════════════
+  cleanup:
+    needs: [provision, test]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete Hetzner server
+        run: |
+          SERVER_ID="${{ needs.provision.outputs.server_id }}"
+          if [ -n "$SERVER_ID" ] && [ "$SERVER_ID" != "" ]; then
+            echo "Deleting server $SERVER_ID..."
+            curl -sS -X DELETE "https://api.hetzner.cloud/v1/servers/$SERVER_ID" \
+              -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}"
+            echo "Server $SERVER_ID deleted."
+          else
+            echo "No server ID found — nothing to delete."
+          fi
