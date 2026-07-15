@@ -21,7 +21,9 @@ A boilerplate project for UI and API test automation using **Selenium WebDriver*
 ## Project Structure
 
 ```
-├── .github/workflows/tests.yml     # CI workflow (manual dispatch)
+├── .github/workflows/
+│   ├── tests.yml                  # CI workflow — GH-hosted runner (manual dispatch)
+│   └── tests-hetzner-runner.yml   # CI workflow — self-hosted Hetzner runner (manual dispatch)
 ├── pom.xml                          # Maven configuration
 ├── testng.xml                       # TestNG suite definition
 ├── src/
@@ -88,12 +90,43 @@ mvn test -DsuiteXmlFile=testng.xml
 
 ### CI / CD (GitHub Actions)
 
-Workflows are triggered **manually** via `workflow_dispatch` in the GitHub UI:
+Two workflows are available, both triggered **manually** via `workflow_dispatch` in the GitHub UI:
+
+#### Run Tests (GH Runner)
+
+Runs tests on a **GitHub-hosted** Ubuntu runner.
 
 1. Go to the **Actions** tab
-2. Select **Run Tests**
+2. Select **Run Tests (GH Runner)**
 3. Optionally choose a custom suite XML file
 4. Click **Run workflow**
+
+#### Run Tests on Hetzner (Self-Hosted Runner)
+
+Provisiones a **Hetzner Cloud** server on-the-fly, installs a self-hosted GitHub Actions runner, executes the tests remotely, and tears everything down automatically.
+
+1. Go to the **Actions** tab
+2. Select **Run Tests on Hetzner (Self-Hosted Runner)**
+3. Choose a TestNG suite, server type (default `cx23`), and datacenter location (default `nbg1`)
+4. Click **Run workflow**
+
+**What happens under the hood:**
+
+| Stage | Description |
+|---|---|
+| **Provision** | Generates a temporary SSH key, uploads it to Hetzner, creates a cloud server, waits for it to boot. |
+| **Setup** | Installs Chrome, Xvfb (virtual display), Maven, and other browser dependencies via cloud-init + SSH. |
+| **Runner** | Downloads and registers an **ephemeral** self-hosted GitHub Actions runner on the Hetzner server. |
+| **Test** | The `test` job runs on the self-hosted runner — checks out the repo, sets up JDK 21, restores Maven cache, and executes `mvn test` with the chosen suite. Xvfb provides a virtual display for headless UI tests. |
+| **Cleanup** | After the tests finish (success or failure), the Hetzner server and temporary SSH key are deleted so nothing is left behind. |
+
+**Required secrets** (configured in the `test` environment):
+
+| Secret | Purpose |
+|---|---|
+| `HCLOUD_TOKEN` | Hetzner Cloud API token (server create/delete) |
+| `GH_PAT` | GitHub Personal Access Token with `repo` scope (runner registration) |
+| `REQRES_API_KEY` | API key for ReqRes tests |
 
 After execution, **ExtentReports** HTML reports are uploaded as a build artifact.
 
