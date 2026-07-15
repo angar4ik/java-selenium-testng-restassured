@@ -73,7 +73,7 @@ jobs:
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
           # cloud-init: base packages + SSH key (printf avoids heredoc YAML issues)
-          USER_DATA=$(printf '#cloud-config\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - xvfb\n  - curl\n  - wget\n  - libicu74\nusers:\n  - name: root\n    ssh_authorized_keys:\n      - %s\n' "${PUB_KEY}" | base64 -w0)
+          USER_DATA=$(printf '#cloud-config\nchpasswd:\n  expire: false\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - xvfb\n  - curl\n  - wget\n  - libicu74\nusers:\n  - name: root\n    ssh_authorized_keys:\n      - %s\n' "${PUB_KEY}" | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
