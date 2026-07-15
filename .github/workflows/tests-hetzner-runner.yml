@@ -74,6 +74,13 @@ jobs:
       - name: Create Hetzner server
         id: server
         run: |
+          # Show available server types for debugging
+          echo "=== Available server types in ${{ inputs.location }} ==="
+          curl -sS "https://api.hetzner.cloud/v1/server_types" \
+            -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
+            | jq -r '.server_types[] | select(.deprecated == null or .deprecated == false) | "\(.name) — \(.cores) vCPU, \(.memory) GB RAM"' \
+            | sort
+
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
           # cloud-init: base packages + SSH key (printf avoids heredoc YAML issues)
