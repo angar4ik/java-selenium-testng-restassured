@@ -73,7 +73,7 @@ jobs:
           PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
           # cloud-init: base packages + SSH key (printf avoids heredoc YAML issues)
-          USER_DATA=$(printf '#cloud-config\nchpasswd:\n  expire: false\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - xvfb\n  - curl\n  - wget\n  - libicu74\nusers:\n  - name: root\n    ssh_authorized_keys:\n      - %s\n' "${PUB_KEY}" | base64 -w0)
+          USER_DATA=$(printf '#cloud-config\nchpasswd:\n  expire: false\npackage_update: true\npackage_upgrade: false\npackages:\n  - openjdk-21-jdk-headless\n  - maven\n  - git\n  - xvfb\n  - curl\n  - wget\n  - libicu74\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    permissions: "0600"\n    content: %s\n' "${PUB_KEY}" | base64 -w0)
 
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
@@ -142,17 +142,23 @@ jobs:
           chmod 600 ~/.ssh/hetzner_tmp
           ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Retry SSH until cloud-init finishes (can take 60-90s)
+          # Retry SSH until cloud-init finishes
+          OK=false
           for i in $(seq 1 12); do
             echo "SSH attempt $i/12..."
-            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
+            if ssh -v -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
               -o StrictHostKeyChecking=accept-new \
-              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"'; then
+              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"' 2>&1; then
               echo "SSH connected (attempt $i)"
+              OK=true
               break
             fi
             sleep 10
           done
+          if [ "$OK" != "true" ]; then
+            echo "::error::SSH failed after 12 attempts. Check cloud-init / key injection."
+            exit 1
+          fi
 
       # -------------------------------------------------------------------
       # 1.5 Install Google Chrome (needed for Selenium UI tests)
