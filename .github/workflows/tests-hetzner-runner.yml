@@ -246,7 +246,6 @@ jobs:
     env:
       DISPLAY: :99
       CHROME_BIN: /usr/bin/google-chrome-stable
-      PATH: /usr/bin:/usr/share/maven/bin:$PATH
 
     steps:
       - name: Checkout
@@ -269,7 +268,9 @@ jobs:
       - name: Run tests
         env:
           REQRES_API_KEY: ${{ secrets.REQRES_API_KEY }}
-        run: mvn test -DsuiteXmlFile=${{ inputs.suite }}
+        run: |
+          export PATH="/usr/bin:/usr/share/maven/bin:$PATH"
+          mvn test -DsuiteXmlFile=${{ inputs.suite }}
 
       - name: Upload ExtentReports
         if: always()
