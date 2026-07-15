@@ -92,6 +92,7 @@ jobs:
             }")
 
           SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id // empty')
+          ROOT_PW=$(echo "$RESPONSE" | jq -r '.server.root_password // empty')
           if [ -z "$SERVER_ID" ]; then
             echo "FAILED to create server!"
             echo "$RESPONSE" | jq '.'
@@ -99,6 +100,7 @@ jobs:
           fi
 
           echo "server_id=$SERVER_ID" >> $GITHUB_OUTPUT
+          echo "root_password=$ROOT_PW" >> $GITHUB_OUTPUT
           echo "Server $SERVER_ID created."
 
       # -------------------------------------------------------------------
@@ -138,25 +140,37 @@ jobs:
       # -------------------------------------------------------------------
       - name: Configure SSH
         run: |
+          sudo apt-get install -y -qq sshpass
           echo "${{ steps.ssh-key.outputs.private_key }}" > ~/.ssh/hetzner_tmp
           chmod 600 ~/.ssh/hetzner_tmp
           ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Retry SSH until cloud-init finishes
-          OK=false
-          for i in $(seq 1 12); do
-            echo "SSH attempt $i/12..."
-            if ssh -v -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
+          # Try key-based SSH first, fall back to root password + inject key
+          for i in $(seq 1 18); do
+            echo "SSH attempt $i/18..."
+            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
               -o StrictHostKeyChecking=accept-new \
-              root@${{ steps.wait.outputs.server_ip }} 'echo "SSH OK"' 2>&1; then
-              echo "SSH connected (attempt $i)"
-              OK=true
+              root@${{ steps.wait.outputs.server_ip }} 'echo SSH_OK' 2>/dev/null; then
+              echo "SSH key auth OK (attempt $i)"
               break
+            fi
+            # Fallback: use root password to inject our key
+            if sshpass -p '${{ steps.server.outputs.root_password }}' \
+              ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+              root@${{ steps.wait.outputs.server_ip }} \
+              "echo '${{ steps.ssh-key.outputs.public_key }}' >> /root/.ssh/authorized_keys && echo KEY_INJECTED" 2>/dev/null; then
+              echo "Key injected via password (attempt $i)"
+              sleep 2
             fi
             sleep 10
           done
-          if [ "$OK" != "true" ]; then
-            echo "::error::SSH failed after 12 attempts. Check cloud-init / key injection."
+
+          # Final verification
+          if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=5 \
+            root@${{ steps.wait.outputs.server_ip }} 'echo SSH_OK' 2>/dev/null; then
+            echo "SSH verified OK"
+          else
+            echo "::error::SSH failed after 18 attempts (3 min)."
             exit 1
           fi
 
