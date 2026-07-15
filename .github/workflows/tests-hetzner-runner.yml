@@ -70,6 +70,16 @@ jobs:
       - name: Create Hetzner server
         id: server
         run: |
+          PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
+
+          # Build cloud-init YAML just for SSH key injection via runcmd
+          echo '#cloud-config' > /tmp/cloud-init.yaml
+          echo 'runcmd:' >> /tmp/cloud-init.yaml
+          echo '  - [mkdir, -p, /root/.ssh]' >> /tmp/cloud-init.yaml
+          echo "  - [sh, -c, 'echo \"${PUB_KEY}\" >> /root/.ssh/authorized_keys']" >> /tmp/cloud-init.yaml
+          echo '  - [chmod, 600, /root/.ssh/authorized_keys]' >> /tmp/cloud-init.yaml
+          USER_DATA=$(base64 -w0 /tmp/cloud-init.yaml)
+
           RESPONSE=$(curl -sS -X POST "https://api.hetzner.cloud/v1/servers" \
             -H "Authorization: Bearer ${{ secrets.HCLOUD_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -82,19 +92,18 @@ jobs:
               \"public_net\": {
                 \"enable_ipv4\": true,
                 \"enable_ipv6\": false
-              }
+              },
+              \"user_data\": \"${USER_DATA}\"
             }")
 
           SERVER_ID=$(echo "$RESPONSE" | jq -r '.server.id // empty')
-          ROOT_PW=$(echo "$RESPONSE" | jq -r '.root_password // empty')
-          if [ -z "$SERVER_ID" ] || [ -z "$ROOT_PW" ]; then
-            echo "FAILED to create server or missing root password!"
+          if [ -z "$SERVER_ID" ]; then
+            echo "FAILED to create server!"
             echo "$RESPONSE" | jq '.'
             exit 1
           fi
 
           echo "server_id=$SERVER_ID" >> $GITHUB_OUTPUT
-          echo "root_password=$ROOT_PW" >> $GITHUB_OUTPUT
           echo "Server $SERVER_ID created."
 
       # -------------------------------------------------------------------
@@ -128,44 +137,27 @@ jobs:
       # -------------------------------------------------------------------
       - name: Setup server
         run: |
-          sudo apt-get install -y -qq sshpass
           echo "${{ steps.ssh-key.outputs.private_key }}" > ~/.ssh/hetzner_tmp
           chmod 600 ~/.ssh/hetzner_tmp
           ssh-keyscan -H ${{ steps.wait.outputs.server_ip }} >> ~/.ssh/known_hosts 2>/dev/null
 
           IP="${{ steps.wait.outputs.server_ip }}"
-          PW='${{ steps.server.outputs.root_password }}'
-          PUB_KEY="${{ steps.ssh-key.outputs.public_key }}"
 
-          # Wait for SSH, then setup
+          # Wait for SSH key auth (cloud-init injects the key via runcmd)
           for i in $(seq 1 30); do
             echo "SSH attempt $i/30..."
-            if sshpass -p "$PW" ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
-              echo "SSH connected (attempt $i)"
+            if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new root@"$IP" 'echo SSH_OK' 2>&1; then
+              echo "SSH key auth OK (attempt $i)"
               break
             fi
-            echo "  failed, retrying in 5s..."
+            echo "  waiting for cloud-init..."
             sleep 5
           done
 
-          # Inject our SSH key for passwordless access
-          echo "Injecting SSH key..."
-          sshpass -p "$PW" ssh root@"$IP" "echo '$PUB_KEY' >> /root/.ssh/authorized_keys"
-          echo "Key injected."
-
           # Install packages + Chrome
           echo "Installing packages..."
-          sshpass -p "$PW" ssh root@"$IP" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless maven git xvfb curl wget && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq; rm -f /tmp/chrome.deb; echo Packages_done'
+          ssh -i ~/.ssh/hetzner_tmp root@"$IP" 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless maven git xvfb curl wget && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f -qq; rm -f /tmp/chrome.deb; echo Packages_done'
           echo "Packages done."
-
-          # Verify key-based SSH
-          echo "Verifying key auth..."
-          if ssh -i ~/.ssh/hetzner_tmp -o ConnectTimeout=10 root@"$IP" 'echo SSH_KEY_OK' 2>&1; then
-            echo "SSH key auth verified"
-          else
-            echo "::error::SSH key setup failed"
-            exit 1
-          fi
 
       # -------------------------------------------------------------------
       # 1.5 Prepare and copy test scripts (not needed — runner does everything)
